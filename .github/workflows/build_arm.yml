@@ -83,6 +83,12 @@ jobs:
           file "$BIN"
           sha256sum "$BIN" | tee "$BIN.sha256"
 
+      - name: 编译设备自检工具 pansou-doctor
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=${{ matrix.goarch }} GOARM=${{ matrix.goarm }} \
+            go build -trimpath -ldflags="-s -w" -o "$BIN-doctor" ./tools/doctor
+          ls -lh "$BIN-doctor"
+
       - name: 安装 qemu-user
         run: |
           sudo apt-get update -q
@@ -142,6 +148,17 @@ jobs:
           fi
           kill $BGPID 2>/dev/null || true
 
+      - name: 自检工具实跑一遍（qemu 下，验证工具本身可用）
+        continue-on-error: true
+        run: |
+          if [ "${{ matrix.goarch }}" = "arm64" ]; then
+            for c in qemu-aarch64 qemu-aarch64-static; do command -v "$c" >/dev/null && QEMU="$c -cpu max" && break; done
+          else
+            for c in qemu-arm qemu-arm-static; do command -v "$c" >/dev/null && QEMU="$c -cpu max" && break; done
+          fi
+          mkdir -p /tmp/ps/cache
+          cd /tmp/ps && PORT=8899 CACHE_PATH=/tmp/ps/cache $QEMU "$GITHUB_WORKSPACE/$BIN-doctor" || true
+
       - name: 上传二进制
         uses: actions/upload-artifact@v4
         with:
@@ -149,5 +166,6 @@ jobs:
           path: |
             ${{ env.BIN }}
             ${{ env.BIN }}.sha256
+            ${{ env.BIN }}-doctor
           if-no-files-found: error
           retention-days: 30
