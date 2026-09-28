@@ -22,6 +22,8 @@ func TestNoDirectEncodingJSONOutsideWrapper(t *testing.T) {
 	}
 	allowed := map[string]bool{
 		filepath.Join("util", "json", "adapter.go"): true,
+		// 32 位 ARM 后端只能用标准库（sonic 不支持），同样属于封装内部
+		filepath.Join("util", "json", "std.go"): true,
 		// 本文件自身要在源码里写出被禁的导入路径，故排除
 		filepath.Join("util", "json", "no_stdlib_json_test.go"): true,
 	}

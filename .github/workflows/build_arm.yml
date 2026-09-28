@@ -12,15 +12,29 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        toolchain: ["1.25", "1.26"]
         include:
-          - label: arm64
+          - toolchain: "1.25"
+            label: arm64
             goarch: arm64
             goarm: ""
-          - label: armv7
+          - toolchain: "1.25"
+            label: armv7
             goarch: arm
             goarm: "7"
-          - label: armv6
+          - toolchain: "1.25"
+            label: armv6
+            goarch: arm
+            goarm: "6"
+          - toolchain: "1.26"
+            label: arm64
+            goarch: arm64
+            goarm: ""
+          - toolchain: "1.26"
+            label: armv7
+            goarch: arm
+            goarm: "7"
+          - toolchain: "1.26"
+            label: armv6
             goarch: arm
             goarm: "6"
     env:
