@@ -17,26 +17,32 @@ jobs:
             label: arm64
             goarch: arm64
             goarm: ""
+            tagflag: ""
+            note: sonic 原生 JIT（需要可执行内存）
           - toolchain: "1.25"
-            label: armv7
-            goarch: arm
-            goarm: "7"
-          - toolchain: "1.25"
-            label: armv6
-            goarch: arm
-            goarm: "6"
-          - toolchain: "1.26"
-            label: arm64
+            label: arm64-nojit
             goarch: arm64
             goarm: ""
+            tagflag: "-tags json_std"
+            note: 强制 encoding/json，不生成机器码
           - toolchain: "1.26"
+            label: arm64-nojit
+            goarch: arm64
+            goarm: ""
+            tagflag: "-tags json_std"
+            note: 同上，验证更新的 Go 工具链
+          - toolchain: "1.25"
             label: armv7
             goarch: arm
             goarm: "7"
-          - toolchain: "1.26"
+            tagflag: ""
+            note: 32 位 ARMv7，sonic 不支持故自动走标准库
+          - toolchain: "1.25"
             label: armv6
             goarch: arm
             goarm: "6"
+            tagflag: ""
+            note: 32 位 ARMv6 兜底
     env:
       BIN: pansou-linux-${{ matrix.label }}-go${{ matrix.toolchain }}
     steps:
@@ -48,45 +54,42 @@ jobs:
         with:
           go-version: ${{ matrix.toolchain }}
 
-      - name: 打印工具链信息
+      - name: 目标与说明
         run: |
           go version
-          echo "目标: GOOS=linux GOARCH=${{ matrix.goarch }} GOARM=${{ matrix.goarm }} CGO_ENABLED=0"
+          echo "目标: GOOS=linux GOARCH=${{ matrix.goarch }} GOARM=${{ matrix.goarm }} CGO_ENABLED=0 ${{ matrix.tagflag }}"
+          echo "说明: ${{ matrix.note }}"
 
       - name: 下载依赖
         run: go mod download && go list -m github.com/bytedance/sonic github.com/Advik-B/cloudscraper github.com/dop251/goja
 
-      - name: 确认 sonic 在本目标下走原生JIT还是纯Go回退
+      - name: 确认 JSON 后端与 sonic 是否进入依赖图
         env:
           CGO_ENABLED: "0"
           GOOS: linux
           GOARCH: ${{ matrix.goarch }}
           GOARM: ${{ matrix.goarm }}
         run: |
-          for p in github.com/bytedance/sonic/decoder github.com/bytedance/sonic/encoder github.com/bytedance/sonic/internal/jit; do
-            echo "--- $p"
-            go list -f 'build={{.GoFiles}} ignored={{.IgnoredGoFiles}}' "$p" 2>/dev/null || echo "(package 不存在，可能被裁剪)"
-          done
+          echo "--- 本目标是否真的链接了 sonic:"
+          go list -deps ${{ matrix.tagflag }} . | grep -c bytedance/sonic || echo "0（未链接 sonic）"
+          echo "--- pansou/util/json 实际参与编译的文件:"
+          go list -f 'build={{.GoFiles}}' ${{ matrix.tagflag }} pansou/util/json
 
       - name: 交叉编译
-        env:
-          CGO_ENABLED: "0"
-          GOOS: linux
-          GOARCH: ${{ matrix.goarch }}
-          GOARM: ${{ matrix.goarm }}
         run: |
-          go build -trimpath -ldflags="-s -w" -o "$BIN" .
+          CGO_ENABLED=0 GOOS=linux GOARCH=${{ matrix.goarch }} GOARM=${{ matrix.goarm }} \
+            go build -trimpath ${{ matrix.tagflag }} -ldflags="-s -w" -o "$BIN" .
           ls -lh "$BIN"
           file "$BIN"
           sha256sum "$BIN" | tee "$BIN.sha256"
-          du -h "$BIN" | awk '{print $1}' > size.txt
 
-      - name: 安装 qemu-user（用于真实启动冒烟测试）
+      - name: 安装 qemu-user
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y -q qemu-user-static binutils-user-mode-linux 2>/dev/null || sudo apt-get install -y -q qemu-user-static
-          qemu-aarch64 --version | head -1
-          qemu-arm --version | head -1
+          sudo apt-get install -y -q qemu-user qemu-user-static
+          for c in qemu-aarch64 qemu-arm qemu-aarch64-static qemu-arm-static; do
+            command -v "$c" && echo "found $c"
+          done
 
       - name: 冒烟测试（qemu-user 下真实启动并请求 /api/health）
         continue-on-error: true
@@ -94,10 +97,11 @@ jobs:
           set -x
           mkdir -p /tmp/ps
           if [ "${{ matrix.goarch }}" = "arm64" ]; then
-            QEMU="qemu-aarch64 -cpu max"
+            for c in qemu-aarch64 qemu-aarch64-static; do command -v "$c" >/dev/null && QEMU="$c -cpu max" && break; done
           else
-            QEMU="qemu-arm -cpu max"
+            for c in qemu-arm qemu-arm-static; do command -v "$c" >/dev/null && QEMU="$c -cpu max" && break; done
           fi
+          echo "使用模拟器: $QEMU"
           env \
             PORT=8899 \
             CACHE_PATH=/tmp/ps/cache \
@@ -109,17 +113,19 @@ jobs:
             HTTP_MAX_CONNS=32 \
             $QEMU "$GITHUB_WORKSPACE/$BIN" > /tmp/ps/run.log 2>&1 &
           BGPID=$!
+          CODE=000
           for i in $(seq 1 25); do
             sleep 2
-            if curl -s -o /tmp/ps/health.json -w "%{http_code}" http://127.0.0.1:8899/api/health | grep -q 200; then
-              echo "=== HEALTH OK after ${i} tries ==="; break
-            fi
+            CODE=$(curl -s -o /tmp/ps/health.json -w "%{http_code}" http://127.0.0.1:8899/api/health || echo 000)
+            [ "$CODE" = "200" ] && { echo "=== HEALTH 200，第 $i 次探测成功 ==="; break; }
+            kill -0 $BGPID 2>/dev/null || { echo "=== 进程已退出，第 $i 次 ==="; break; }
           done
-          echo "=== health.json ==="; head -c 1200 /tmp/ps/health.json 2>/dev/null || echo "(none)"
-          echo; echo "=== 一次真实搜索 ==="
-          curl -s -m 30 "http://127.0.0.1:8899/api/search?kw=test&res=merge&src=tg" | head -c 600 || echo "(search failed)"
-          echo; echo "=== run.log (前 80 行) ==="; head -80 /tmp/ps/run.log
-          echo "=== run.log (后 40 行) ==="; tail -40 /tmp/ps/run.log
+          echo "=== health http_code=$CODE ==="
+          head -c 1500 /tmp/ps/health.json 2>/dev/null || echo "(health 无内容)"
+          echo; echo "=== 一次真实搜索 src=tg ==="
+          curl -s -m 40 "http://127.0.0.1:8899/api/search?kw=%E7%94%B5%E5%BD%B1&res=merge&src=tg" -o /tmp/ps/search.json -w "http=%{http_code} bytes=%{size_download}\n" || echo "(search 失败)"
+          head -c 700 /tmp/ps/search.json 2>/dev/null || true
+          echo; echo "=== run.log 全文 ==="; cat /tmp/ps/run.log
           kill $BGPID 2>/dev/null || true
 
       - name: 上传二进制
