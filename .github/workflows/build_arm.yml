@@ -122,10 +122,24 @@ jobs:
           done
           echo "=== health http_code=$CODE ==="
           head -c 1500 /tmp/ps/health.json 2>/dev/null || echo "(health 无内容)"
-          echo; echo "=== 一次真实搜索 src=tg ==="
-          curl -s -m 40 "http://127.0.0.1:8899/api/search?kw=%E7%94%B5%E5%BD%B1&res=merge&src=tg" -o /tmp/ps/search.json -w "http=%{http_code} bytes=%{size_download}\n" || echo "(search 失败)"
-          head -c 700 /tmp/ps/search.json 2>/dev/null || true
+          for kw in "%E7%94%B5%E5%BD%B1" "%E7%BB%BC%E8%89%BA"; do
+            echo; echo "=== 真实搜索 src=tg kw=$kw ==="
+            curl -s -m 60 "http://127.0.0.1:8899/api/search?kw=${kw}&res=merge&src=tg" -o /tmp/ps/search.json -w "http=%{http_code} bytes=%{size_download}\n" || echo "(search 失败)"
+            head -c 400 /tmp/ps/search.json 2>/dev/null || true
+            echo
+          done
+          echo; echo "=== 后台补齐等待（TG backfill 会再写一次缓存，正是 32 位对齐最容易炸的路径） ==="
+          sleep 12
+          kill -0 $BGPID 2>/dev/null && echo "进程仍存活" || echo "进程已退出"
+          curl -s -o /dev/null -w "二次 health http=%{http_code}\n" -m 15 http://127.0.0.1:8899/api/health || true
           echo; echo "=== run.log 全文 ==="; cat /tmp/ps/run.log
+          echo; echo "=== 崩溃判定 ==="
+          if grep -qE "^panic:|fatal error|unaligned 64-bit" /tmp/ps/run.log; then
+            echo "RESULT: PANIC_DETECTED"; grep -nE "^panic:|fatal error|unaligned 64-bit|atomic_arm|sharded_memory_cache" /tmp/ps/run.log | head -12
+            exit 1
+          else
+            echo "RESULT: NO_PANIC"
+          fi
           kill $BGPID 2>/dev/null || true
 
       - name: 上传二进制

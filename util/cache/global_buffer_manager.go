@@ -87,9 +87,14 @@ type GlobalBufferManager struct {
 // GlobalBufferStats 全局缓冲区统计
 type GlobalBufferStats struct {
 	// 缓冲区统计
+	//
+	// 下面这几个 int64 会被 atomic 读写，必须连续排在结构体开头：32 位 ARM 上
+	// 只有对象的**首个字**保证 8 字节对齐，插在 float64/time.Time 之后就会
+	// panic: unaligned 64-bit atomic operation。
 	ActiveBuffers         int64 // 活跃缓冲区数量
 	TotalBuffersCreated   int64 // 总创建缓冲区数量
 	TotalBuffersDestroyed int64 // 总销毁缓冲区数量
+	MemoryUsage           int64 // 内存使用量
 
 	// 操作统计
 	TotalOperationsBuffered int64 // 总缓冲操作数
@@ -104,7 +109,6 @@ type GlobalBufferStats struct {
 	// 性能统计
 	LastCleanupTime  time.Time     // 最后清理时间
 	CleanupFrequency time.Duration // 清理频率
-	MemoryUsage      int64         // 内存使用量
 }
 
 // NewGlobalBufferManager 创建全局缓冲区管理器

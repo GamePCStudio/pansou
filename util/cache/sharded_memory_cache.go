@@ -27,19 +27,25 @@ type cleanupTarget interface {
 }
 
 // 分片内存缓存项
+//
+// lastUsed 必须是第一个字段：32 位 ARM（linux/arm, GOARM=6/7）上对 int64 做原子操作
+// 要求 8 字节对齐，而 Go 只保证 new()/&T{} 分配出的对象**首个字**是 8 字节对齐的。
+// 放中间就会在 atomic.StoreInt64 处 panic: unaligned 64-bit atomic operation。
 type shardedMemoryCacheItem struct {
+	lastUsed     int64 // 使用原子操作的时间戳
 	data         []byte
 	expiry       time.Time
-	lastUsed     int64 // 使用原子操作的时间戳
 	lastModified time.Time
 	size         int
 }
 
 // 单个分片
+//
+// currSize 同上：原子读写的 int64 必须排在首位。
 type memoryCacheShard struct {
+	currSize int64
 	items    map[string]*shardedMemoryCacheItem
 	mutex    sync.RWMutex
-	currSize int64
 }
 
 // 分片内存缓存
