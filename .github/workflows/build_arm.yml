@@ -1,17 +1,7 @@
 name: 交叉编译 arm/arm64 静态二进制
 
 on:
-  workflow_dispatch:
-    inputs:
-      toolchains:
-        description: "Go 工具链：1.25=sonic 原生JIT，1.26=sonic 纯Go回退"
-        type: choice
-        required: false
-        default: both
-        options:
-          - both
-          - "1.25"
-          - "1.26"
+  workflow_dispatch: {}
 
 permissions:
   contents: read
@@ -33,7 +23,6 @@ jobs:
           - label: armv6
             goarch: arm
             goarm: "6"
-    if: ${{ github.event.inputs.toolchains == 'both' || github.event.inputs.toolchains == matrix.toolchain }}
     env:
       BIN: pansou-linux-${{ matrix.label }}-go${{ matrix.toolchain }}
     steps:
