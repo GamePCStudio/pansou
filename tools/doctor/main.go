@@ -58,26 +58,20 @@ func main() {
 	// 3. execmem：sonic 的 JIT 需要"可写且可执行"的匿名内存
 	//    安卓的 SELinux 对 untrusted_app / shell 域常常拒绝 execmem，
 	//    这一项 FAIL 就说明必须用 no-jit（encoding/json）构建。
-	const (
-		protRead       = 0x1
-		protWrite      = 0x2
-		protExec       = 0x4
-		mapPrivateAnon = 0x02 | 0x20
-		noFD           = ^uintptr(0)
-	)
-	addr, _, e1 := syscall.Syscall6(syscall.SYS_MMAP, 0, 4096,
-		uintptr(protRead|protWrite), uintptr(mapPrivateAnon), noFD, 0)
-	if e1 != syscall.Errno(0) {
-		line("mmap RW", false, e1.Error())
+	// 走 syscall.Mmap/Mprotect 而不是裸 syscall(SYS_MMAP)：ARM EABI 的内核入口是
+	// mmap2（偏移按页算、超过 4 个参数要传结构体指针），裸调在 32 位 ARM 上会 EFAULT。
+	if b, err := syscall.Mmap(-1, 0, 4096,
+		syscall.PROT_READ|syscall.PROT_WRITE,
+		syscall.MAP_PRIVATE|syscall.MAP_ANON); err != nil {
+		line("mmap RW", false, err.Error())
 	} else {
-		_, _, e2 := syscall.Syscall6(syscall.SYS_MPROTECT, addr, 4096, uintptr(protRead|protExec), 0, 0, 0)
-		if e2 != syscall.Errno(0) {
+		if err := syscall.Mprotect(b, syscall.PROT_READ|syscall.PROT_EXEC); err != nil {
 			line("mprotect RX (execmem)", false,
-				e2.Error()+" → sonic JIT 版本在此环境会失败，请用 -nojit 二进制")
+				err.Error()+" → sonic JIT 版本在此环境会失败，请用 -nojit 二进制")
 		} else {
 			line("mprotect RX (execmem)", true, "允许生成可执行内存，JIT 版可用")
 		}
-		syscall.Syscall6(syscall.SYS_MUNMAP, addr, 4096, 0, 0, 0, 0)
+		_ = syscall.Munmap(b)
 	}
 
 	fmt.Println()
@@ -117,7 +111,11 @@ func main() {
 	if px == "" {
 		px, pset = os.Getenv("HTTP_PROXY"), "HTTP_PROXY"
 	}
-	line("代理配置", px != "", fmt.Sprintf("%s=%q", pset, px))
+	if px == "" {
+		line("代理配置", false, "未设置 HTTPS_PROXY/HTTP_PROXY（国内网络下 t.me 直连不通，以 TLS t.me 那项为准）")
+	} else {
+		line("代理配置", true, fmt.Sprintf("%s=%q", pset, px))
+	}
 	fmt.Println()
 
 	// 6. 工作目录可写（缓存目录不可写时 pansou 会 log.Fatalf 直接退出）
