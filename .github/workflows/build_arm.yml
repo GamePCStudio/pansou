@@ -1,0 +1,130 @@
+name: 交叉编译 arm/arm64 静态二进制
+
+on:
+  workflow_dispatch:
+    inputs:
+      toolchains:
+        description: "Go 工具链：1.25=sonic 原生JIT，1.26=sonic 纯Go回退"
+        type: choice
+        required: false
+        default: both
+        options:
+          - both
+          - "1.25"
+          - "1.26"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain: ["1.25", "1.26"]
+        include:
+          - label: arm64
+            goarch: arm64
+            goarm: ""
+          - label: armv7
+            goarch: arm
+            goarm: "7"
+          - label: armv6
+            goarch: arm
+            goarm: "6"
+    if: ${{ github.event.inputs.toolchains == 'both' || github.event.inputs.toolchains == matrix.toolchain }}
+    env:
+      BIN: pansou-linux-${{ matrix.label }}-go${{ matrix.toolchain }}
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Go ${{ matrix.toolchain }}
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.toolchain }}
+
+      - name: 打印工具链信息
+        run: |
+          go version
+          echo "目标: GOOS=linux GOARCH=${{ matrix.goarch }} GOARM=${{ matrix.goarm }} CGO_ENABLED=0"
+
+      - name: 下载依赖
+        run: go mod download && go list -m github.com/bytedance/sonic github.com/Advik-B/cloudscraper github.com/dop251/goja
+
+      - name: 确认 sonic 在本目标下走原生JIT还是纯Go回退
+        env:
+          CGO_ENABLED: "0"
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+          GOARM: ${{ matrix.goarm }}
+        run: |
+          for p in github.com/bytedance/sonic/decoder github.com/bytedance/sonic/encoder github.com/bytedance/sonic/internal/jit; do
+            echo "--- $p"
+            go list -f 'build={{.GoFiles}} ignored={{.IgnoredGoFiles}}' "$p" 2>/dev/null || echo "(package 不存在，可能被裁剪)"
+          done
+
+      - name: 交叉编译
+        env:
+          CGO_ENABLED: "0"
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+          GOARM: ${{ matrix.goarm }}
+        run: |
+          go build -trimpath -ldflags="-s -w" -o "$BIN" .
+          ls -lh "$BIN"
+          file "$BIN"
+          sha256sum "$BIN" | tee "$BIN.sha256"
+          du -h "$BIN" | awk '{print $1}' > size.txt
+
+      - name: 安装 qemu-user（用于真实启动冒烟测试）
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q qemu-user-static binutils-user-mode-linux 2>/dev/null || sudo apt-get install -y -q qemu-user-static
+          qemu-aarch64 --version | head -1
+          qemu-arm --version | head -1
+
+      - name: 冒烟测试（qemu-user 下真实启动并请求 /api/health）
+        continue-on-error: true
+        run: |
+          set -x
+          mkdir -p /tmp/ps
+          if [ "${{ matrix.goarch }}" = "arm64" ]; then
+            QEMU="qemu-aarch64 -cpu max"
+          else
+            QEMU="qemu-arm -cpu max"
+          fi
+          env \
+            PORT=8899 \
+            CACHE_PATH=/tmp/ps/cache \
+            CHANNELS=tgsearchers7 \
+            ENABLED_PLUGINS="" \
+            CONCURRENCY=5 \
+            OUTBOUND_MAX_CONCURRENCY=8 \
+            ASYNC_MAX_BACKGROUND_WORKERS=4 \
+            HTTP_MAX_CONNS=32 \
+            $QEMU "$GITHUB_WORKSPACE/$BIN" > /tmp/ps/run.log 2>&1 &
+          BGPID=$!
+          for i in $(seq 1 25); do
+            sleep 2
+            if curl -s -o /tmp/ps/health.json -w "%{http_code}" http://127.0.0.1:8899/api/health | grep -q 200; then
+              echo "=== HEALTH OK after ${i} tries ==="; break
+            fi
+          done
+          echo "=== health.json ==="; head -c 1200 /tmp/ps/health.json 2>/dev/null || echo "(none)"
+          echo; echo "=== 一次真实搜索 ==="
+          curl -s -m 30 "http://127.0.0.1:8899/api/search?kw=test&res=merge&src=tg" | head -c 600 || echo "(search failed)"
+          echo; echo "=== run.log (前 80 行) ==="; head -80 /tmp/ps/run.log
+          echo "=== run.log (后 40 行) ==="; tail -40 /tmp/ps/run.log
+          kill $BGPID 2>/dev/null || true
+
+      - name: 上传二进制
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.BIN }}
+          path: |
+            ${{ env.BIN }}
+            ${{ env.BIN }}.sha256
+          if-no-files-found: error
+          retention-days: 30
